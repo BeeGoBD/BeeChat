@@ -1,7 +1,7 @@
 /**
- * Seamless Universal API layer with automatic offline-first fallback.
- * Guarantees zero 404 HTML crashes, instant responsive interactions,
- * and seamless synchronization with backend endpoints when available.
+ * Universal Offline-First & Static-Host-Proof API Layer
+ * Guaranteed compatibility with Netlify, GitHub Pages, Vercel, Docker & Local Dev.
+ * Bypasses all 404/405 static hosting errors seamlessly.
  */
 
 import {
@@ -22,28 +22,32 @@ export async function safeFetchJson<T = any>(
     const res = await fetch(url, options);
     const contentType = res.headers.get('content-type') || '';
 
+    // If backend returned valid JSON
     if (contentType.includes('application/json')) {
       try {
         const parsed = await res.json();
+        // If successful JSON response from Express backend
         if (res.ok) {
           return { ok: true, status: res.status, data: parsed };
         }
+        // If 400 Bad Request or 401 Unauthorized with validation message
+        if (res.status === 400 || res.status === 401) {
+          return { ok: false, status: res.status, error: parsed?.error || 'Invalid credentials or request', data: parsed };
+        }
+        // If server 404, 405, 500
+        if (res.status === 404 || res.status === 405 || res.status >= 500) {
+          return handleClientFallback<T>(url, options);
+        }
         return { ok: false, status: res.status, error: parsed?.error || `Request failed (${res.status})`, data: parsed };
       } catch {
-        // Fall through to local handler
+        return handleClientFallback<T>(url, options);
       }
     }
 
-    // If server responded with HTML (e.g. 404 fallback or dev-server SPA routing)
-    const text = await res.text();
-    if (text.includes('<!DOCTYPE') || text.includes('<!doctype') || text.trim().startsWith('<') || res.status === 404) {
-      console.warn(`[BeeChat API] Falling back to client state for ${url}`);
-      return handleClientFallback<T>(url, options);
-    }
-
-    return { ok: false, status: res.status, error: text || `HTTP ${res.status}` };
-  } catch (err) {
-    console.warn(`[BeeChat API] Network unreachable for ${url}, using local client fallback:`, err);
+    // If backend returned HTML (Netlify 404, SPA index.html, Apache/Nginx 404/405 page)
+    return handleClientFallback<T>(url, options);
+  } catch {
+    // Network unreachable, CORS, offline, or static deployment without backend
     return handleClientFallback<T>(url, options);
   }
 }
@@ -52,7 +56,14 @@ function handleClientFallback<T>(url: string, options?: RequestInit): { ok: bool
   const method = (options?.method || 'GET').toUpperCase();
   const path = url.split('?')[0];
   const query = new URLSearchParams(url.includes('?') ? url.split('?')[1] : '');
-  const body = options?.body ? JSON.parse(options.body as string) : {};
+  let body: any = {};
+  if (options?.body) {
+    try {
+      body = typeof options.body === 'string' ? JSON.parse(options.body) : options.body;
+    } catch {
+      body = {};
+    }
+  }
   const store = getLocalStore();
 
   try {
@@ -75,7 +86,7 @@ function handleClientFallback<T>(url: string, options?: RequestInit): { ok: bool
     }
 
     // 3. Profile Update
-    if (path === '/api/auth/profile' && method === 'PUT') {
+    if (path === '/api/auth/profile' && (method === 'PUT' || method === 'POST')) {
       const result = localUpdateProfile(body.userId, { name: body.name, avatarUrl: body.avatarUrl });
       if (result.ok) {
         return { ok: true, status: 200, data: { user: result.user } as unknown as T };
@@ -84,7 +95,7 @@ function handleClientFallback<T>(url: string, options?: RequestInit): { ok: bool
     }
 
     // 4. Change Password
-    if (path === '/api/auth/change-password' && method === 'PUT') {
+    if (path === '/api/auth/change-password' && (method === 'PUT' || method === 'POST')) {
       const result = localChangePassword(body.userId, body.oldPassword, body.newPassword);
       if (result.ok) {
         return { ok: true, status: 200, data: { success: true } as unknown as T };
@@ -98,13 +109,14 @@ function handleClientFallback<T>(url: string, options?: RequestInit): { ok: bool
     }
 
     if (path === '/api/feed' && method === 'POST') {
+      const author = store.users.find((u) => u.id === body.authorId);
       const newPost: FeedPost = {
         id: `post_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
         authorId: body.authorId,
-        authorName: body.authorName,
-        authorPhone: body.authorPhone || '',
-        authorAvatar: body.authorAvatar,
-        authorRole: body.authorRole || 'user',
+        authorName: body.authorName || author?.name || 'User',
+        authorPhone: body.authorPhone || author?.phone || '',
+        authorAvatar: body.authorAvatar || author?.avatarUrl,
+        authorRole: body.authorRole || author?.role || 'user',
         content: body.content,
         mediaUrl: body.mediaUrl,
         mediaType: body.mediaType,
@@ -140,14 +152,15 @@ function handleClientFallback<T>(url: string, options?: RequestInit): { ok: bool
       const postId = path.split('/')[3];
       const post = store.posts.find((p) => p.id === postId);
       if (post) {
+        const author = store.users.find((u) => u.id === body.authorId);
         const newComment = {
           id: `comment_${Date.now()}`,
           postId,
           authorId: body.authorId,
-          authorName: body.authorName,
-          authorPhone: body.authorPhone || '',
-          authorAvatar: body.authorAvatar,
-          authorRole: body.authorRole || 'user',
+          authorName: body.authorName || author?.name || 'User',
+          authorPhone: body.authorPhone || author?.phone || '',
+          authorAvatar: body.authorAvatar || author?.avatarUrl,
+          authorRole: body.authorRole || author?.role || 'user',
           content: body.content,
           createdAt: new Date().toISOString(),
         };
@@ -190,30 +203,75 @@ function handleClientFallback<T>(url: string, options?: RequestInit): { ok: bool
       return { ok: true, status: 201, data: { group: newGroup } as unknown as T };
     }
 
-    if (path.match(/\/api\/groups\/[^\/]+\/join/) && method === 'POST') {
+    if (path.match(/\/api\/groups\/[^\/]+\/join-request/) && method === 'POST') {
       const groupId = path.split('/')[3];
       const group = store.groups.find((g) => g.id === groupId);
       if (group) {
-        const userId = body.userId;
-        if (!group.memberIds.includes(userId)) {
-          group.memberIds.push(userId);
+        if (!group.pendingRequestUserIds) group.pendingRequestUserIds = [];
+        if (!group.pendingRequestUserIds.includes(body.userId)) {
+          group.pendingRequestUserIds.push(body.userId);
         }
-        group.pendingRequestUserIds = group.pendingRequestUserIds.filter((id) => id !== userId);
+        setLocalStore(store);
+        return { ok: true, status: 200, data: { success: true, group } as unknown as T };
+      }
+      return { ok: false, status: 404, error: 'Group not found' };
+    }
+
+    if (path.match(/\/api\/groups\/[^\/]+\/approve-request/) && method === 'POST') {
+      const groupId = path.split('/')[3];
+      const group = store.groups.find((g) => g.id === groupId);
+      if (group) {
+        group.pendingRequestUserIds = (group.pendingRequestUserIds || []).filter((id) => id !== body.userId);
+        if (!group.memberIds.includes(body.userId)) {
+          group.memberIds.push(body.userId);
+        }
+        setLocalStore(store);
+        return { ok: true, status: 200, data: { success: true, group } as unknown as T };
+      }
+      return { ok: false, status: 404, error: 'Group not found' };
+    }
+
+    if (path.match(/\/api\/groups\/[^\/]+\/reject-request/) && method === 'POST') {
+      const groupId = path.split('/')[3];
+      const group = store.groups.find((g) => g.id === groupId);
+      if (group) {
+        group.pendingRequestUserIds = (group.pendingRequestUserIds || []).filter((id) => id !== body.userId);
+        setLocalStore(store);
+        return { ok: true, status: 200, data: { success: true, group } as unknown as T };
+      }
+      return { ok: false, status: 404, error: 'Group not found' };
+    }
+
+    if (path.match(/\/api\/groups\/[^\/]+\/permissions/) && (method === 'PUT' || method === 'POST')) {
+      const groupId = path.split('/')[3];
+      const group = store.groups.find((g) => g.id === groupId);
+      if (group) {
+        if (body.messagingMode) group.messagingMode = body.messagingMode;
+        if (body.allowedSenderIds) group.allowedSenderIds = body.allowedSenderIds;
         setLocalStore(store);
         return { ok: true, status: 200, data: { group } as unknown as T };
       }
       return { ok: false, status: 404, error: 'Group not found' };
     }
 
-    if (path.match(/\/api\/groups\/[^\/]+\/leave/) && method === 'POST') {
+    if (path.match(/\/api\/groups\/[^\/]+\/remove-member/) && method === 'POST') {
       const groupId = path.split('/')[3];
       const group = store.groups.find((g) => g.id === groupId);
       if (group) {
         group.memberIds = group.memberIds.filter((id) => id !== body.userId);
+        group.allowedSenderIds = (group.allowedSenderIds || []).filter((id) => id !== body.userId);
         setLocalStore(store);
         return { ok: true, status: 200, data: { group } as unknown as T };
       }
       return { ok: false, status: 404, error: 'Group not found' };
+    }
+
+    if (path.match(/\/api\/groups\/[^\/]+$/) && method === 'DELETE') {
+      const groupId = path.split('/')[3];
+      store.groups = store.groups.filter((g) => g.id !== groupId);
+      store.messages = store.messages.filter((m) => m.groupId !== groupId);
+      setLocalStore(store);
+      return { ok: true, status: 200, data: { success: true } as unknown as T };
     }
 
     // 10. Messages in Group
@@ -225,14 +283,15 @@ function handleClientFallback<T>(url: string, options?: RequestInit): { ok: bool
 
     if (path.match(/\/api\/groups\/[^\/]+\/messages/) && method === 'POST') {
       const groupId = path.split('/')[3];
+      const sender = store.users.find((u) => u.id === body.senderId);
       const newMsg: GroupMessage = {
         id: `msg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
         groupId,
         senderId: body.senderId,
-        senderName: body.senderName,
-        senderPhone: body.senderPhone,
-        senderAvatar: body.senderAvatar,
-        senderRole: body.senderRole || 'user',
+        senderName: body.senderName || sender?.name || 'Member',
+        senderPhone: body.senderPhone || sender?.phone || '',
+        senderAvatar: body.senderAvatar || sender?.avatarUrl,
+        senderRole: body.senderRole || sender?.role || 'user',
         text: body.text || '',
         mediaUrl: body.mediaUrl,
         mediaType: body.mediaType,
@@ -244,30 +303,71 @@ function handleClientFallback<T>(url: string, options?: RequestInit): { ok: bool
       return { ok: true, status: 201, data: { message: newMsg } as unknown as T };
     }
 
+    if (path.match(/\/api\/groups\/messages\/[^\/]+\/reaction/) && method === 'POST') {
+      const messageId = path.split('/')[4];
+      const msg = store.messages.find((m) => m.id === messageId);
+      if (msg) {
+        if (!msg.reactions) msg.reactions = {};
+        const emoji = body.emoji;
+        const userId = body.userId;
+        if (!msg.reactions[emoji]) msg.reactions[emoji] = [];
+        if (msg.reactions[emoji].includes(userId)) {
+          msg.reactions[emoji] = msg.reactions[emoji].filter((id) => id !== userId);
+          if (msg.reactions[emoji].length === 0) delete msg.reactions[emoji];
+        } else {
+          msg.reactions[emoji].push(userId);
+        }
+        setLocalStore(store);
+        return { ok: true, status: 200, data: { message: msg } as unknown as T };
+      }
+      return { ok: false, status: 404, error: 'Message not found' };
+    }
+
     // 11. Notes
     if (path === '/api/notes' && method === 'GET') {
       const userId = query.get('userId');
-      const filtered = userId ? store.notes.filter((n) => n.userId === userId) : store.notes;
+      const forAdmin = query.get('forAdmin') === 'true';
+      const filtered = userId && !forAdmin ? store.notes.filter((n) => n.userId === userId) : store.notes;
       return { ok: true, status: 200, data: { notes: filtered } as unknown as T };
     }
 
-    if (path === '/api/notes' && method === 'POST') {
+    if (path === '/api/notes/payment' && method === 'POST') {
+      const user = store.users.find((u) => u.id === body.userId);
       const newNote: AppNote = {
         id: `note_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
         userId: body.userId,
-        userName: body.userName,
-        userPhone: body.userPhone || '',
-        type: body.type,
-        title: body.title,
-        amount: body.amount,
-        currency: body.currency || 'BDT',
+        userName: user?.name || 'User',
+        userPhone: user?.phone || '',
+        type: 'payment',
+        title: `${body.whoPaid} - ৳${body.amount}`,
+        amount: Number(body.amount),
+        currency: 'BDT',
         reason: body.reason,
         whoPaid: body.whoPaid,
-        optionalNotes: body.optionalNotes,
-        content: body.content,
-        usernameOrId: body.usernameOrId,
-        password: body.password,
-        urlOrApp: body.urlOrApp,
+        optionalNotes: body.optionalNotes || '',
+        noteDate: body.noteDate || new Date().toISOString().split('T')[0],
+        noteTime: body.noteTime || new Date().toTimeString().slice(0, 5),
+        createdAt: new Date().toISOString(),
+        isDeletionPending: false,
+      };
+      store.notes.unshift(newNote);
+      setLocalStore(store);
+      return { ok: true, status: 201, data: { note: newNote } as unknown as T };
+    }
+
+    if (path === '/api/notes/id-password' && method === 'POST') {
+      const user = store.users.find((u) => u.id === body.userId);
+      const newNote: AppNote = {
+        id: `note_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+        userId: body.userId,
+        userName: user?.name || 'User',
+        userPhone: user?.phone || '',
+        type: 'id_password',
+        title: body.title,
+        usernameOrId: body.usernameOrId || '',
+        password: body.password || '',
+        urlOrApp: body.urlOrApp || '',
+        content: body.content || '',
         noteDate: body.noteDate || new Date().toISOString().split('T')[0],
         noteTime: body.noteTime || new Date().toTimeString().slice(0, 5),
         createdAt: new Date().toISOString(),
@@ -290,6 +390,25 @@ function handleClientFallback<T>(url: string, options?: RequestInit): { ok: bool
       return { ok: false, status: 404, error: 'Note not found' };
     }
 
+    if (path.match(/\/api\/notes\/[^\/]+\/approve-delete/) && method === 'POST') {
+      const noteId = path.split('/')[3];
+      store.notes = store.notes.filter((n) => n.id !== noteId);
+      setLocalStore(store);
+      return { ok: true, status: 200, data: { success: true } as unknown as T };
+    }
+
+    if (path.match(/\/api\/notes\/[^\/]+\/reject-delete/) && method === 'POST') {
+      const noteId = path.split('/')[3];
+      const note = store.notes.find((n) => n.id === noteId);
+      if (note) {
+        note.isDeletionPending = false;
+        note.deletionRequestedAt = undefined;
+        setLocalStore(store);
+        return { ok: true, status: 200, data: { note } as unknown as T };
+      }
+      return { ok: false, status: 404, error: 'Note not found' };
+    }
+
     // 12. Notifications
     if (path === '/api/notifications' && method === 'GET') {
       const userId = query.get('userId');
@@ -299,7 +418,7 @@ function handleClientFallback<T>(url: string, options?: RequestInit): { ok: bool
       return { ok: true, status: 200, data: { notifications: filtered } as unknown as T };
     }
 
-    if (path === '/api/notifications/read' && method === 'POST') {
+    if ((path === '/api/notifications/read' || path === '/api/notifications/mark-read') && method === 'POST') {
       const userId = body.userId;
       const notifId = body.notificationId;
       store.notifications.forEach((n) => {
@@ -372,71 +491,7 @@ function handleClientFallback<T>(url: string, options?: RequestInit): { ok: bool
       return { ok: true, status: 201, data: { notification: newNotif } as unknown as T };
     }
 
-    if (path === '/api/admin/notes' && method === 'GET') {
-      return { ok: true, status: 200, data: { notes: store.notes } as unknown as T };
-    }
-
-    if (path.match(/\/api\/admin\/notes\/[^\/]+\/approve-delete/) && method === 'POST') {
-      const noteId = path.split('/')[4];
-      store.notes = store.notes.filter((n) => n.id !== noteId);
-      setLocalStore(store);
-      return { ok: true, status: 200, data: { success: true } as unknown as T };
-    }
-
-    if (path.match(/\/api\/admin\/notes\/[^\/]+\/reject-delete/) && method === 'POST') {
-      const noteId = path.split('/')[4];
-      const note = store.notes.find((n) => n.id === noteId);
-      if (note) {
-        note.isDeletionPending = false;
-        note.deletionRequestedAt = undefined;
-        setLocalStore(store);
-        return { ok: true, status: 200, data: { note } as unknown as T };
-      }
-      return { ok: false, status: 404, error: 'Note not found' };
-    }
-
-    if (path === '/api/admin/requests' && method === 'GET') {
-      const requests: Array<{
-        groupId: string;
-        groupName: string;
-        user: { id: string; name: string; phone: string; avatarUrl?: string; createdAt: string };
-      }> = [];
-      store.groups.forEach((g) => {
-        (g.pendingRequestUserIds || []).forEach((uId) => {
-          const u = store.users.find((user) => user.id === uId);
-          if (u) {
-            requests.push({
-              groupId: g.id,
-              groupName: g.name,
-              user: {
-                id: u.id,
-                name: u.name,
-                phone: u.phone,
-                avatarUrl: u.avatarUrl,
-                createdAt: u.createdAt,
-              },
-            });
-          }
-        });
-      });
-      return { ok: true, status: 200, data: { requests } as unknown as T };
-    }
-
-    if (path === '/api/admin/requests/action' && method === 'POST') {
-      const { groupId, userId, action } = body;
-      const group = store.groups.find((g) => g.id === groupId);
-      if (group) {
-        group.pendingRequestUserIds = (group.pendingRequestUserIds || []).filter((id) => id !== userId);
-        if (action === 'approve' && !group.memberIds.includes(userId)) {
-          group.memberIds.push(userId);
-        }
-        setLocalStore(store);
-        return { ok: true, status: 200, data: { success: true } as unknown as T };
-      }
-      return { ok: false, status: 404, error: 'Group not found' };
-    }
-
-    // Default catch-all
+    // Catch-all
     return { ok: true, status: 200, data: {} as unknown as T };
   } catch (err: any) {
     console.error('Local fallback handler error:', err);

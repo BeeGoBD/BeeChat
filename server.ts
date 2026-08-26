@@ -284,7 +284,7 @@ async function startServer() {
       cleanIdentifier === "admin" ||
       cleanIdentifier === "01700000000"
     ) {
-      const admin = db.users.find((u) => u.email === "admin@zayettl.com");
+      const admin = db.users.find((u) => u.email === "admin@zayettl.com" || u.role === "admin");
       if (admin && password === "Work@ETTL2026.com#") {
         return res.json({ user: safeUser(admin), isAdmin: true });
       }

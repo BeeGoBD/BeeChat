@@ -1,0 +1,6 @@
+{
+  "name": "Bee Chat",
+  "description": "Bee Chat - Fast, secure internal communication, social feed, group chat, and records management platform.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

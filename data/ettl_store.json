@@ -1,0 +1,30 @@
+{
+  "users": [
+    {
+      "id": "admin-root",
+      "name": "ETTL System Admin",
+      "phone": "01700000000",
+      "email": "admin@zayettl.com",
+      "passwordHash": "Work@ETTL2026.com#",
+      "role": "admin",
+      "avatarUrl": "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80",
+      "isBlocked": false,
+      "createdAt": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "usr_1787782420100_qtyws",
+      "name": "Jobaer",
+      "phone": "01405005651",
+      "passwordHash": "Jobaer@2026#",
+      "role": "user",
+      "avatarUrl": "https://api.dicebear.com/7.x/initials/svg?seed=Jobaer&backgroundColor=f59e0b",
+      "isBlocked": false,
+      "createdAt": "2026-08-26T22:13:40.100Z"
+    }
+  ],
+  "posts": [],
+  "groups": [],
+  "messages": [],
+  "notes": [],
+  "notifications": []
+}
